@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { OrderStatus, Prisma } from '@prisma/client';
-import { FailedPreconditionError } from '../common/errors/domain-errors';
+import { FailedPreconditionError, NotFoundError } from '../common/errors/domain-errors';
 
 export type TransitionTrigger =
   'stock_reserved' | 'stock_reservation_failed' | 'cancel' | 'ship' | 'deliver';
@@ -37,29 +37,53 @@ export function getAllowedTriggers(from: OrderStatus): TransitionTrigger[] {
   return TRANSITIONS.filter((t) => t.from === from).map((t) => t.trigger);
 }
 
+export interface LockedOrder {
+  id: string;
+  userId: string;
+  status: OrderStatus;
+}
+
+export interface TransitionOptions {
+  reason?: string;
+  // Runs against the locked row before the transition is resolved — e.g. an
+  // ownership check. Throwing aborts the transaction.
+  authorize?: (order: LockedOrder) => void;
+}
+
 export interface TransitionResult {
+  userId: string;
   fromStatus: OrderStatus;
   toStatus: OrderStatus;
 }
 
 @Injectable()
 export class OrderStateMachine {
+  // Must run inside the caller's transaction. The row is read with
+  // `FOR UPDATE`, so two concurrent transitions on one order (admin ship vs
+  // user cancel, or a KFK-4 stock result vs a cancel) serialise: the second
+  // waits, then sees the committed status and fails FAILED_PRECONDITION
+  // instead of both succeeding off the same stale read.
   async transition(
     tx: Prisma.TransactionClient,
     orderId: string,
     trigger: TransitionTrigger,
-    reason?: string,
+    options: TransitionOptions = {},
   ): Promise<TransitionResult> {
-    const order = await tx.order.findUnique({
-      where: { id: orderId },
-      select: { status: true },
-    });
-
-    if (!order) {
-      throw new FailedPreconditionError(`Order ${orderId} not found`);
+    const rows = await tx.$queryRaw<{ user_id: string; status: OrderStatus }[]>`
+      SELECT user_id, status::text AS status
+      FROM orders
+      WHERE id = ${orderId}::uuid
+      FOR UPDATE
+    `;
+    const row = rows[0];
+    if (!row) {
+      throw new NotFoundError('Order not found');
     }
 
-    const fromStatus = order.status;
+    const locked: LockedOrder = { id: orderId, userId: row.user_id, status: row.status };
+    options.authorize?.(locked);
+
+    const fromStatus = locked.status;
     const toStatus = resolveTransition(fromStatus, trigger);
 
     await tx.order.update({
@@ -72,10 +96,10 @@ export class OrderStateMachine {
         orderId,
         fromStatus,
         toStatus,
-        reason: reason ?? null,
+        reason: options.reason ?? null,
       },
     });
 
-    return { fromStatus, toStatus };
+    return { userId: locked.userId, fromStatus, toStatus };
   }
 }

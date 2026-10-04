@@ -4,10 +4,7 @@ import { PUBLISHER } from './publisher';
 
 @Global()
 @Module({
-  providers: [
-    KafkaProducerService,
-    { provide: PUBLISHER, useExisting: KafkaProducerService },
-  ],
+  providers: [KafkaProducerService, { provide: PUBLISHER, useExisting: KafkaProducerService }],
   exports: [KafkaProducerService, PUBLISHER],
 })
 export class KafkaModule {}

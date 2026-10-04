@@ -20,7 +20,6 @@ import {
 } from '@us-man-qa-sim/ecom-contracts/generated/order';
 import { GrpcExceptionFilter } from '../common/errors/grpc-exception.filter';
 import { readIdentity, requireAdmin } from '../identity/identity.util';
-import { ValidationError } from '../common/errors/domain-errors';
 import { OrderService } from './order.service';
 import { toProtoOrder } from './order.mapper';
 
@@ -35,31 +34,11 @@ export class OrderController implements OrderServiceController {
     metadata?: Metadata,
   ): Promise<CreateOrderResponse> {
     const identity = readIdentity(metadata);
-
-    if (!request.addressId) {
-      throw new ValidationError('address_id is required');
-    }
-    if (!request.items || request.items.length === 0) {
-      throw new ValidationError('At least one item is required');
-    }
-
-    const order = await this.orderService.createOrder({
-      userId: identity.userId,
-      addressId: request.addressId,
-      items: request.items.map((i) => ({
-        productId: i.productId,
-        quantity: i.quantity,
-      })),
-      correlationId: identity.requestId,
-    });
-
+    const order = await this.orderService.createOrder(request, identity);
     return { order: toProtoOrder(order) };
   }
 
-  async getOrder(
-    request: GetOrderRequest,
-    metadata?: Metadata,
-  ): Promise<GetOrderResponse> {
+  async getOrder(request: GetOrderRequest, metadata?: Metadata): Promise<GetOrderResponse> {
     const identity = readIdentity(metadata);
     const order = await this.orderService.getOrder(request, identity);
     return { order: toProtoOrder(order) };
@@ -109,10 +88,7 @@ export class OrderController implements OrderServiceController {
     return { order: toProtoOrder(order) };
   }
 
-  async shipOrder(
-    request: ShipOrderRequest,
-    metadata?: Metadata,
-  ): Promise<ShipOrderResponse> {
+  async shipOrder(request: ShipOrderRequest, metadata?: Metadata): Promise<ShipOrderResponse> {
     const identity = readIdentity(metadata);
     requireAdmin(identity);
     const order = await this.orderService.shipOrder(request, identity);

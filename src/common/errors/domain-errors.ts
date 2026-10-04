@@ -4,7 +4,8 @@ export type DomainErrorKind =
   | 'ALREADY_EXISTS'
   | 'PERMISSION_DENIED'
   | 'UNAUTHENTICATED'
-  | 'FAILED_PRECONDITION';
+  | 'FAILED_PRECONDITION'
+  | 'UNAVAILABLE';
 
 export abstract class DomainError extends Error {
   abstract readonly kind: DomainErrorKind;
@@ -37,4 +38,10 @@ export class UnauthenticatedError extends DomainError {
 
 export class FailedPreconditionError extends DomainError {
   readonly kind = 'FAILED_PRECONDITION';
+}
+
+// A downstream service (user / product) was unreachable or timed out. The
+// caller may retry; nothing was written.
+export class UnavailableError extends DomainError {
+  readonly kind = 'UNAVAILABLE';
 }

@@ -10,6 +10,7 @@ import {
   NotFoundError,
   PermissionDeniedError,
   UnauthenticatedError,
+  UnavailableError,
   ValidationError,
 } from '../src/common/errors/domain-errors';
 
@@ -58,6 +59,7 @@ describe('GrpcExceptionFilter (Prisma)', () => {
     [new PermissionDeniedError('nope'), GrpcStatus.PERMISSION_DENIED],
     [new UnauthenticatedError('who?'), GrpcStatus.UNAUTHENTICATED],
     [new FailedPreconditionError('wrong state'), GrpcStatus.FAILED_PRECONDITION],
+    [new UnavailableError('product-service unavailable'), GrpcStatus.UNAVAILABLE],
   ])('maps %p to correct gRPC code', async (err, expected) => {
     const mapped = await caught(filter, err);
     expect(code(mapped)).toBe(expected);

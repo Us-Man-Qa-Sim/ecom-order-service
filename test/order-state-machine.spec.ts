@@ -1,5 +1,9 @@
-import { OrderStatus } from '@prisma/client';
-import { FailedPreconditionError } from '../src/common/errors/domain-errors';
+import { OrderStatus, Prisma } from '@prisma/client';
+import {
+  FailedPreconditionError,
+  NotFoundError,
+  PermissionDeniedError,
+} from '../src/common/errors/domain-errors';
 import {
   resolveTransition,
   getAllowedTriggers,
@@ -74,31 +78,32 @@ describe('getAllowedTriggers', () => {
 describe('OrderStateMachine.transition', () => {
   let sm: OrderStateMachine;
   let tx: {
-    order: { findUnique: jest.Mock; update: jest.Mock };
+    $queryRaw: jest.Mock;
+    order: { update: jest.Mock };
     orderStatusHistory: { create: jest.Mock };
   };
+  const asTx = () => tx as unknown as Prisma.TransactionClient;
+
+  // The locked read returns snake_case columns straight from SQL.
+  function lockedRow(status: OrderStatus, userId = 'user-1') {
+    tx.$queryRaw.mockResolvedValue([{ user_id: userId, status }]);
+  }
 
   beforeEach(() => {
     sm = new OrderStateMachine();
     tx = {
-      order: {
-        findUnique: jest.fn(),
-        update: jest.fn(),
-      },
-      orderStatusHistory: {
-        create: jest.fn(),
-      },
+      $queryRaw: jest.fn(),
+      order: { update: jest.fn().mockResolvedValue({}) },
+      orderStatusHistory: { create: jest.fn().mockResolvedValue({}) },
     };
   });
 
   it('transitions PENDING → CONFIRMED via stock_reserved', async () => {
-    tx.order.findUnique.mockResolvedValue({ status: 'PENDING' });
-    tx.order.update.mockResolvedValue({});
-    tx.orderStatusHistory.create.mockResolvedValue({});
+    lockedRow('PENDING');
 
-    const result = await sm.transition(tx as any, 'order-1', 'stock_reserved');
+    const result = await sm.transition(asTx(), 'order-1', 'stock_reserved');
 
-    expect(result).toEqual({ fromStatus: 'PENDING', toStatus: 'CONFIRMED' });
+    expect(result).toEqual({ userId: 'user-1', fromStatus: 'PENDING', toStatus: 'CONFIRMED' });
     expect(tx.order.update).toHaveBeenCalledWith({
       where: { id: 'order-1' },
       data: { status: 'CONFIRMED' },
@@ -113,30 +118,36 @@ describe('OrderStateMachine.transition', () => {
     });
   });
 
-  it('stores reason when provided', async () => {
-    tx.order.findUnique.mockResolvedValue({ status: 'PENDING' });
-    tx.order.update.mockResolvedValue({});
-    tx.orderStatusHistory.create.mockResolvedValue({});
+  it('reads the order row with FOR UPDATE so concurrent transitions serialise', async () => {
+    lockedRow('CONFIRMED');
 
-    await sm.transition(tx as any, 'order-1', 'cancel', 'User requested cancellation');
+    await sm.transition(asTx(), 'order-1', 'ship');
+
+    const [strings, ...values] = tx.$queryRaw.mock.calls[0] as [TemplateStringsArray, ...unknown[]];
+    expect(strings.join('?')).toMatch(/FOR UPDATE/);
+    expect(values).toEqual(['order-1']);
+  });
+
+  it('stores reason when provided', async () => {
+    lockedRow('PENDING');
+
+    await sm.transition(asTx(), 'order-1', 'cancel', { reason: 'User requested cancellation' });
 
     expect(tx.orderStatusHistory.create).toHaveBeenCalledWith({
       data: expect.objectContaining({ reason: 'User requested cancellation' }),
     });
   });
 
-  it('throws FailedPreconditionError when order not found', async () => {
-    tx.order.findUnique.mockResolvedValue(null);
+  it('throws NotFoundError when order not found', async () => {
+    tx.$queryRaw.mockResolvedValue([]);
 
-    await expect(sm.transition(tx as any, 'missing-id', 'cancel')).rejects.toThrow(
-      FailedPreconditionError,
-    );
+    await expect(sm.transition(asTx(), 'missing-id', 'cancel')).rejects.toThrow(NotFoundError);
   });
 
   it('throws FailedPreconditionError for illegal transition', async () => {
-    tx.order.findUnique.mockResolvedValue({ status: 'DELIVERED' });
+    lockedRow('DELIVERED');
 
-    await expect(sm.transition(tx as any, 'order-1', 'cancel')).rejects.toThrow(
+    await expect(sm.transition(asTx(), 'order-1', 'cancel')).rejects.toThrow(
       FailedPreconditionError,
     );
 
@@ -144,33 +155,42 @@ describe('OrderStateMachine.transition', () => {
     expect(tx.orderStatusHistory.create).not.toHaveBeenCalled();
   });
 
+  it('passes the locked row to authorize and aborts before writing when it throws', async () => {
+    lockedRow('PENDING', 'owner-1');
+    const authorize = jest.fn(() => {
+      throw new PermissionDeniedError('nope');
+    });
+
+    await expect(sm.transition(asTx(), 'order-1', 'cancel', { authorize })).rejects.toThrow(
+      PermissionDeniedError,
+    );
+
+    expect(authorize).toHaveBeenCalledWith({ id: 'order-1', userId: 'owner-1', status: 'PENDING' });
+    expect(tx.order.update).not.toHaveBeenCalled();
+    expect(tx.orderStatusHistory.create).not.toHaveBeenCalled();
+  });
+
   it('transitions CONFIRMED → CANCELLED via cancel', async () => {
-    tx.order.findUnique.mockResolvedValue({ status: 'CONFIRMED' });
-    tx.order.update.mockResolvedValue({});
-    tx.orderStatusHistory.create.mockResolvedValue({});
+    lockedRow('CONFIRMED');
 
-    const result = await sm.transition(tx as any, 'order-1', 'cancel', 'Out of stock');
+    const result = await sm.transition(asTx(), 'order-1', 'cancel', { reason: 'Out of stock' });
 
-    expect(result).toEqual({ fromStatus: 'CONFIRMED', toStatus: 'CANCELLED' });
+    expect(result).toEqual({ userId: 'user-1', fromStatus: 'CONFIRMED', toStatus: 'CANCELLED' });
   });
 
   it('transitions CONFIRMED → SHIPPED via ship', async () => {
-    tx.order.findUnique.mockResolvedValue({ status: 'CONFIRMED' });
-    tx.order.update.mockResolvedValue({});
-    tx.orderStatusHistory.create.mockResolvedValue({});
+    lockedRow('CONFIRMED');
 
-    const result = await sm.transition(tx as any, 'order-1', 'ship');
+    const result = await sm.transition(asTx(), 'order-1', 'ship');
 
-    expect(result).toEqual({ fromStatus: 'CONFIRMED', toStatus: 'SHIPPED' });
+    expect(result).toEqual({ userId: 'user-1', fromStatus: 'CONFIRMED', toStatus: 'SHIPPED' });
   });
 
   it('transitions SHIPPED → DELIVERED via deliver', async () => {
-    tx.order.findUnique.mockResolvedValue({ status: 'SHIPPED' });
-    tx.order.update.mockResolvedValue({});
-    tx.orderStatusHistory.create.mockResolvedValue({});
+    lockedRow('SHIPPED');
 
-    const result = await sm.transition(tx as any, 'order-1', 'deliver');
+    const result = await sm.transition(asTx(), 'order-1', 'deliver');
 
-    expect(result).toEqual({ fromStatus: 'SHIPPED', toStatus: 'DELIVERED' });
+    expect(result).toEqual({ userId: 'user-1', fromStatus: 'SHIPPED', toStatus: 'DELIVERED' });
   });
 });

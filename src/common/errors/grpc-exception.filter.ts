@@ -13,6 +13,7 @@ const kindToStatus: Record<DomainErrorKind, number> = {
   PERMISSION_DENIED: GrpcStatus.PERMISSION_DENIED,
   UNAUTHENTICATED: GrpcStatus.UNAUTHENTICATED,
   FAILED_PRECONDITION: GrpcStatus.FAILED_PRECONDITION,
+  UNAVAILABLE: GrpcStatus.UNAVAILABLE,
 };
 
 @Catch()

@@ -9,25 +9,28 @@ import { OutboxService } from '../outbox/outbox.service';
 import { ProductGrpcClient } from '../grpc/product.client';
 import { UserGrpcClient } from '../grpc/user.client';
 import { callGrpc, GrpcCallTimeouts } from '../grpc/grpc-call.util';
-import { NotFoundError, PermissionDeniedError, ValidationError } from '../common/errors/domain-errors';
 import {
+  FailedPreconditionError,
+  NotFoundError,
+  PermissionDeniedError,
+  ValidationError,
+} from '../common/errors/domain-errors';
+import {
+  CreateOrderInputSchema,
   GetOrderInputSchema,
   ListMyOrdersInputSchema,
   ListAllOrdersInputSchema,
   CancelOrderInputSchema,
   ShipOrderInputSchema,
   DeliverOrderInputSchema,
+  type CreateOrderInput,
   type ListMyOrdersInput,
 } from './dto/order.dto';
-import type { Identity } from '../identity/identity.util';
-import { OrderStateMachine, type TransitionTrigger } from './order-state-machine';
+import { toOutgoingMetadata, type Identity } from '../identity/identity.util';
+import { OrderStateMachine, type LockedOrder, type TransitionTrigger } from './order-state-machine';
 
-export interface CreateOrderInput {
-  userId: string;
-  addressId: string;
-  items: { productId: string; quantity: number }[];
-  correlationId?: string;
-}
+// `total_minor` / `unit_price_minor` are Postgres INTEGER (int32).
+const INT32_MAX = 2_147_483_647;
 
 export type OrderWithItems = PrismaOrder & { items: PrismaOrderItem[] };
 
@@ -50,75 +53,40 @@ export class OrderService {
     private readonly stateMachine: OrderStateMachine,
   ) {}
 
-  async createOrder(input: CreateOrderInput): Promise<OrderWithItems> {
-    if (input.items.length === 0) {
-      throw new ValidationError('Order must contain at least one item');
-    }
+  async createOrder(raw: unknown, identity: Identity): Promise<OrderWithItems> {
+    const input = parse(CreateOrderInputSchema, raw, 'CreateOrder');
+    const productIds = input.items.map((i) => i.productId);
 
-    for (const item of input.items) {
-      if (item.quantity < 1) {
-        throw new ValidationError('Quantity must be at least 1');
-      }
-    }
-
-    const uniqueProductIds = [...new Set(input.items.map((i) => i.productId))];
-    if (uniqueProductIds.length !== input.items.length) {
-      throw new ValidationError('Duplicate product ids in order items');
-    }
-
+    // The caller's identity is forwarded so user-service applies its ownership
+    // check: another user's address id comes back NOT_FOUND.
     const [productsResponse, addressResponse] = await Promise.all([
       callGrpc(
-        this.products.service.getProductsByIds({ productIds: uniqueProductIds }),
+        this.products.service.getProductsByIds({ productIds }, toOutgoingMetadata(identity)),
         this.timeouts.long,
+        'product-service',
       ),
-      callGrpc(this.users.service.getAddress({ addressId: input.addressId }), this.timeouts.fast),
+      callGrpc(
+        this.users.service.getAddress({ addressId: input.addressId }, toOutgoingMetadata(identity)),
+        this.timeouts.fast,
+        'user-service',
+      ),
     ]);
-
-    const productMap = new Map<string, Product>();
-    for (const product of productsResponse.products) {
-      productMap.set(product.id, product);
-    }
-
-    for (const id of uniqueProductIds) {
-      if (!productMap.has(id)) {
-        throw new NotFoundError(`Product not found: ${id}`);
-      }
-    }
 
     const address = addressResponse.address;
     if (!address) {
       throw new NotFoundError('Address not found');
     }
 
-    const firstProduct = productMap.get(uniqueProductIds[0])!;
-    const currency = firstProduct.price?.currency ?? 'USD';
-
-    const orderItems: Prisma.OrderItemCreateWithoutOrderInput[] = [];
-    let totalMinor = 0;
-
-    for (const item of input.items) {
-      const product = productMap.get(item.productId)!;
-      const unitPriceMinor = product.price?.amountMinor ?? 0;
-      totalMinor += unitPriceMinor * item.quantity;
-
-      orderItems.push({
-        productId: item.productId,
-        productName: product.name,
-        unitPriceMinor,
-        quantity: item.quantity,
-      });
-    }
-
-    const shippingSnapshot = toShippingSnapshot(address);
+    const snapshot = snapshotItems(input, productsResponse.products ?? []);
 
     return this.prisma.$transaction(async (tx) => {
       const order = await tx.order.create({
         data: {
-          userId: input.userId,
-          totalMinor,
-          currency,
-          shippingAddress: shippingSnapshot,
-          items: { create: orderItems },
+          userId: identity.userId,
+          totalMinor: snapshot.totalMinor,
+          currency: snapshot.currency,
+          shippingAddress: toShippingSnapshot(address),
+          items: { create: snapshot.items },
           statusHistory: {
             create: {
               toStatus: 'PENDING',
@@ -139,7 +107,7 @@ export class OrderService {
             quantity: i.quantity,
           })),
         },
-        correlationId: input.correlationId,
+        correlationId: identity.requestId,
       });
 
       return order;
@@ -155,9 +123,7 @@ export class OrderService {
     if (!order) {
       throw new NotFoundError('Order not found');
     }
-    if (identity.role !== 'ADMIN' && order.userId !== identity.userId) {
-      throw new PermissionDeniedError('You do not own this order');
-    }
+    assertCanAccess(order, identity);
     return order;
   }
 
@@ -177,81 +143,68 @@ export class OrderService {
   async cancelOrder(raw: unknown, identity: Identity): Promise<OrderWithItems> {
     const input = parse(CancelOrderInputSchema, raw, 'CancelOrder');
 
-    return this.transitionOrder(
-      input.orderId,
+    return this.transitionOrder({
+      orderId: input.orderId,
       identity,
-      'cancel',
-      TOPICS.ORDER_CANCELLED,
-      (userId) => ({ orderId: input.orderId, userId, reason: input.reason }),
-      input.reason,
-      false,
-    );
+      trigger: 'cancel',
+      topic: TOPICS.ORDER_CANCELLED,
+      buildPayload: (userId) => ({ orderId: input.orderId, userId, reason: input.reason }),
+      reason: input.reason,
+      adminOnly: false,
+    });
   }
 
   async shipOrder(raw: unknown, identity: Identity): Promise<OrderWithItems> {
     const input = parse(ShipOrderInputSchema, raw, 'ShipOrder');
 
-    return this.transitionOrder(
-      input.orderId,
+    return this.transitionOrder({
+      orderId: input.orderId,
       identity,
-      'ship',
-      TOPICS.ORDER_SHIPPED,
-      (userId) => ({ orderId: input.orderId, userId }),
-      undefined,
-      true,
-    );
+      trigger: 'ship',
+      topic: TOPICS.ORDER_SHIPPED,
+      buildPayload: (userId) => ({ orderId: input.orderId, userId }),
+      adminOnly: true,
+    });
   }
 
   async deliverOrder(raw: unknown, identity: Identity): Promise<OrderWithItems> {
     const input = parse(DeliverOrderInputSchema, raw, 'DeliverOrder');
 
-    return this.transitionOrder(
-      input.orderId,
+    return this.transitionOrder({
+      orderId: input.orderId,
       identity,
-      'deliver',
-      TOPICS.ORDER_DELIVERED,
-      (userId) => ({ orderId: input.orderId, userId }),
-      undefined,
-      true,
-    );
+      trigger: 'deliver',
+      topic: TOPICS.ORDER_DELIVERED,
+      buildPayload: (userId) => ({ orderId: input.orderId, userId }),
+      adminOnly: true,
+    });
   }
 
-  private async transitionOrder<T extends TopicName>(
-    orderId: string,
-    identity: Identity,
-    trigger: TransitionTrigger,
-    topic: T,
-    buildPayload: (userId: string) => EventPayloadMap[T],
-    reason?: string,
-    adminOnly?: boolean,
-  ): Promise<OrderWithItems> {
-    if (adminOnly) {
-      if (identity.role !== 'ADMIN') {
-        throw new PermissionDeniedError('Admin role required');
-      }
+  private async transitionOrder<T extends TopicName>(args: {
+    orderId: string;
+    identity: Identity;
+    trigger: TransitionTrigger;
+    topic: T;
+    buildPayload: (userId: string) => EventPayloadMap[T];
+    reason?: string;
+    adminOnly: boolean;
+  }): Promise<OrderWithItems> {
+    const { orderId, identity, adminOnly } = args;
+    if (adminOnly && identity.role !== 'ADMIN') {
+      throw new PermissionDeniedError('Admin role required');
     }
 
     return this.prisma.$transaction(async (tx) => {
-      const order = await tx.order.findUnique({
-        where: { id: orderId },
-        select: { userId: true },
+      const { userId } = await this.stateMachine.transition(tx, orderId, args.trigger, {
+        reason: args.reason,
+        authorize: (order) => assertCanAccess(order, identity),
       });
-
-      if (!order) {
-        throw new NotFoundError('Order not found');
-      }
-
-      if (!adminOnly && identity.role !== 'ADMIN' && order.userId !== identity.userId) {
-        throw new PermissionDeniedError('You do not own this order');
-      }
-
-      await this.stateMachine.transition(tx, orderId, trigger, reason);
 
       await this.outbox.enqueue(tx, {
         aggregateType: 'Order',
         aggregateId: orderId,
-        topic,
-        payload: buildPayload(order.userId),
+        topic: args.topic,
+        payload: args.buildPayload(userId),
         correlationId: identity.requestId,
       });
 
@@ -274,7 +227,8 @@ export class OrderService {
       this.prisma.order.findMany({
         where,
         include: { items: true },
-        orderBy: { createdAt: 'desc' },
+        // `id` tie-break keeps paging stable across equal timestamps.
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip,
         take: pageSize,
       }),
@@ -283,6 +237,64 @@ export class OrderService {
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
     return { orders, total, page, pageSize, totalPages };
   }
+}
+
+// Ownership is a NOT_FOUND, not PERMISSION_DENIED (same rule as user-service
+// addresses): "exists but isn't yours" would let a probe enumerate order ids.
+function assertCanAccess(order: Pick<LockedOrder, 'userId'>, identity: Identity): void {
+  if (identity.role !== 'ADMIN' && order.userId !== identity.userId) {
+    throw new NotFoundError('Order not found');
+  }
+}
+
+interface ItemSnapshot {
+  items: Prisma.OrderItemCreateWithoutOrderInput[];
+  totalMinor: number;
+  currency: string;
+}
+
+// Freezes name + price for every line from the product-service response. An
+// order is single-currency: totals in minor units only add up within one.
+function snapshotItems(input: CreateOrderInput, products: Product[]): ItemSnapshot {
+  const byId = new Map(products.map((p) => [p.id, p]));
+  const items: Prisma.OrderItemCreateWithoutOrderInput[] = [];
+  let currency: string | undefined;
+  let totalMinor = 0;
+
+  for (const line of input.items) {
+    const product = byId.get(line.productId);
+    if (!product) {
+      throw new NotFoundError(`Product not found: ${line.productId}`);
+    }
+    if (!product.isActive) {
+      throw new FailedPreconditionError(`Product is not available: ${line.productId}`);
+    }
+    if (!product.price) {
+      throw new FailedPreconditionError(`Product has no price: ${line.productId}`);
+    }
+
+    currency ??= product.price.currency;
+    if (product.price.currency !== currency) {
+      throw new FailedPreconditionError(
+        `All items must share one currency (got ${currency} and ${product.price.currency})`,
+      );
+    }
+
+    totalMinor += product.price.amountMinor * line.quantity;
+    if (totalMinor > INT32_MAX) {
+      throw new ValidationError('Order total exceeds the maximum allowed amount');
+    }
+
+    items.push({
+      productId: line.productId,
+      productName: product.name,
+      unitPriceMinor: product.price.amountMinor,
+      quantity: line.quantity,
+    });
+  }
+
+  // `currency` is set: the schema guarantees at least one item.
+  return { items, totalMinor, currency: currency! };
 }
 
 function parse<T>(schema: ZodType<T>, raw: unknown, rpc: string): T {

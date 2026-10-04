@@ -111,8 +111,22 @@ describe('toProtoOrder', () => {
   it('maps multiple items', () => {
     const order = makePrismaOrder({
       items: [
-        { id: 'oi-1', orderId: 'ord-1', productId: 'p-1', productName: 'A', unitPriceMinor: 100, quantity: 1 },
-        { id: 'oi-2', orderId: 'ord-1', productId: 'p-2', productName: 'B', unitPriceMinor: 200, quantity: 3 },
+        {
+          id: 'oi-1',
+          orderId: 'ord-1',
+          productId: 'p-1',
+          productName: 'A',
+          unitPriceMinor: 100,
+          quantity: 1,
+        },
+        {
+          id: 'oi-2',
+          orderId: 'ord-1',
+          productId: 'p-2',
+          productName: 'B',
+          unitPriceMinor: 200,
+          quantity: 3,
+        },
       ],
     });
     const proto = toProtoOrder(order as any);

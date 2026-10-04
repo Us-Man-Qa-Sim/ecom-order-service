@@ -1,4 +1,4 @@
-import type { Metadata } from '@grpc/grpc-js';
+import { Metadata } from '@grpc/grpc-js';
 import { PermissionDeniedError, UnauthenticatedError } from '../common/errors/domain-errors';
 
 export const ROLES = ['CUSTOMER', 'ADMIN'] as const;
@@ -51,6 +51,17 @@ function normaliseRole(value: string): Role | undefined {
   if (upper === 'CUSTOMER' || upper === 'ROLE_CUSTOMER') return 'CUSTOMER';
   if (upper === 'ADMIN' || upper === 'ROLE_ADMIN') return 'ADMIN';
   return undefined;
+}
+
+// Re-emits the caller's identity on an outgoing call. Downstream services
+// enforce ownership from it (user-service only returns the caller's own
+// addresses), so order-service acts on behalf of the user, never as itself.
+export function toOutgoingMetadata(identity: Identity): Metadata {
+  const metadata = new Metadata();
+  metadata.set(HEADER_USER_ID, identity.userId);
+  metadata.set(HEADER_USER_ROLE, identity.role);
+  if (identity.requestId) metadata.set(HEADER_REQUEST_ID, identity.requestId);
+  return metadata;
 }
 
 export function requireAdmin(identity: Identity): void {

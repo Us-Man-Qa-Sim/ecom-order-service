@@ -4,17 +4,17 @@ Order management microservice for the ecom platform. Exposes a gRPC API (`ecom.o
 
 ## Status
 
-| Task                                          | Status  |
-| --------------------------------------------- | ------- |
-| ORD-1 Scaffold                                | Done    |
-| ORD-2 Prisma schema                           | Pending |
-| ORD-3 gRPC clients (product, user)            | Pending |
-| ORD-4 CreateOrder                             | Pending |
-| ORD-5 State machine                           | Pending |
-| ORD-6 GetOrder / ListMyOrders / ListAllOrders | Pending |
-| ORD-7 CancelOrder / ShipOrder / DeliverOrder  | Pending |
-| ORD-8 Outbox relay                            | Pending |
-| ORD-9 Tests                                   | Pending |
+| Task                                          | Status |
+| --------------------------------------------- | ------ |
+| ORD-1 Scaffold                                | Done   |
+| ORD-2 Prisma schema                           | Done   |
+| ORD-3 gRPC clients (product, user)            | Done   |
+| ORD-4 CreateOrder                             | Done   |
+| ORD-5 State machine                           | Done   |
+| ORD-6 GetOrder / ListMyOrders / ListAllOrders | Done   |
+| ORD-7 CancelOrder / ShipOrder / DeliverOrder  | Done   |
+| ORD-8 Outbox relay                            | Done   |
+| ORD-9 Tests                                   | Done   |
 
 ## Responsibilities
 
@@ -28,7 +28,11 @@ Order management microservice for the ecom platform. Exposes a gRPC API (`ecom.o
 
 ### gRPC (`:5003`)
 
-All RPCs are in the `ecom.order.v1.OrderService` package. Currently all return `UNIMPLEMENTED` — real logic lands in ORD-4 through ORD-7.
+All RPCs are in the `ecom.order.v1.OrderService` package. Every RPC requires the gateway's `x-user-id` / `x-user-role` metadata (`UNAUTHENTICATED` otherwise). Orders the caller does not own answer `NOT_FOUND`, never `PERMISSION_DENIED`, so order ids can't be probed.
+
+`CreateOrder` calls user-service `GetAddress` and product-service `GetProductsByIds` **on behalf of the caller** (identity metadata is forwarded), so another user's address id is `NOT_FOUND`. Items: 1–100 lines, distinct ObjectId product ids, quantity 1–10 000. Products must be active, priced, and share one currency; the total must fit in int32 minor units. If a downstream service is unreachable or times out, the RPC answers `UNAVAILABLE`.
+
+Status changes go through `OrderStateMachine`, which locks the order row (`SELECT … FOR UPDATE`) so concurrent transitions serialise; an illegal transition is `FAILED_PRECONDITION`. Every transition writes an `order_status_history` row and an outbox event in the same transaction.
 
 | RPC             | Description                                                   |
 | --------------- | ------------------------------------------------------------- |

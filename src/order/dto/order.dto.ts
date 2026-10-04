@@ -9,6 +9,18 @@ const zeroAsUnset = (v: unknown) => (v === 0 || v === null ? undefined : v);
 
 const UUID = z.string().uuid();
 
+// Product ids are MongoDB ObjectIds (product-service). Validating here turns a
+// malformed id into INVALID_ARGUMENT before any downstream call.
+const ObjectId = z
+  .string()
+  .trim()
+  .regex(/^[0-9a-fA-F]{24}$/, 'must be a 24-character hex ObjectId');
+
+// Same limits as the gateway's CreateOrderDto. 100 items is also
+// product-service's GetProductsByIds cap.
+export const MAX_ITEMS_PER_ORDER = 100;
+export const MAX_QUANTITY_PER_ITEM = 10_000;
+
 const protoToPrismaStatus: Record<number, PrismaOrderStatus> = {
   [ProtoOrderStatus.ORDER_STATUS_PENDING]: 'PENDING',
   [ProtoOrderStatus.ORDER_STATUS_CONFIRMED]: 'CONFIRMED',
@@ -17,12 +29,17 @@ const protoToPrismaStatus: Record<number, PrismaOrderStatus> = {
   [ProtoOrderStatus.ORDER_STATUS_CANCELLED]: 'CANCELLED',
 };
 
+// ORDER_STATUS_UNSPECIFIED (0) means "no filter"; any other value outside the
+// enum is rejected rather than silently widening the query to every status.
 const PrismaStatusFromProto = z
   .preprocess(zeroAsUnset, z.number().int().optional())
-  .transform((v) => {
+  .transform((v, ctx) => {
     if (v === undefined) return undefined;
     const mapped = protoToPrismaStatus[v];
-    if (!mapped) return undefined;
+    if (!mapped) {
+      ctx.addIssue({ code: 'custom', message: `unknown order status ${v}` });
+      return z.NEVER;
+    }
     return mapped;
   });
 
@@ -34,6 +51,23 @@ const PaginationInput = absent(
     })
     .default({ page: 1, pageSize: 20 }),
 );
+
+export const CreateOrderInputSchema = z.object({
+  addressId: UUID,
+  items: z
+    .array(
+      z.object({
+        productId: ObjectId,
+        quantity: z.number().int().min(1).max(MAX_QUANTITY_PER_ITEM),
+      }),
+    )
+    .min(1)
+    .max(MAX_ITEMS_PER_ORDER)
+    .refine((items) => new Set(items.map((i) => i.productId)).size === items.length, {
+      message: 'duplicate productId; combine quantities into one line',
+    }),
+});
+export type CreateOrderInput = z.infer<typeof CreateOrderInputSchema>;
 
 export const GetOrderInputSchema = z.object({
   orderId: UUID,
