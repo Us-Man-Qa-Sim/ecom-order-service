@@ -5,6 +5,7 @@ import { validateEnv } from './config/env.validation';
 import { HealthModule } from './health/health.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { OutboxModule } from './outbox/outbox.module';
+import { KafkaModule } from './kafka/kafka.module';
 import { OrderModule } from './order/order.module';
 
 @Module({
@@ -28,6 +29,7 @@ import { OrderModule } from './order/order.module';
     }),
     PrismaModule,
     OutboxModule,
+    KafkaModule,
     HealthModule,
     OrderModule,
   ],
