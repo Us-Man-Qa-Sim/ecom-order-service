@@ -50,10 +50,7 @@ export class OrderService {
         this.products.service.getProductsByIds({ productIds: uniqueProductIds }),
         this.timeouts.long,
       ),
-      callGrpc(
-        this.users.service.getAddress({ addressId: input.addressId }),
-        this.timeouts.fast,
-      ),
+      callGrpc(this.users.service.getAddress({ addressId: input.addressId }), this.timeouts.fast),
     ]);
 
     const productMap = new Map<string, Product>();

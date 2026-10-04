@@ -36,7 +36,10 @@ function unimplemented(rpc: string): never {
 export class OrderController implements OrderServiceController {
   constructor(private readonly orderService: OrderService) {}
 
-  async createOrder(request: CreateOrderRequest, metadata?: Metadata): Promise<CreateOrderResponse> {
+  async createOrder(
+    request: CreateOrderRequest,
+    metadata?: Metadata,
+  ): Promise<CreateOrderResponse> {
     const identity = readIdentity(metadata);
 
     if (!request.addressId) {
