@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Order as PrismaOrder, OrderItem as PrismaOrderItem, Prisma } from '@prisma/client';
-import { TOPICS } from '@us-man-qa-sim/ecom-contracts/events';
+import { TOPICS, type EventPayloadMap, type TopicName } from '@us-man-qa-sim/ecom-contracts/events';
 import type { Product } from '@us-man-qa-sim/ecom-contracts/generated/product';
 import type { Address } from '@us-man-qa-sim/ecom-contracts/generated/user';
 import type { ZodType } from 'zod';
@@ -14,9 +14,13 @@ import {
   GetOrderInputSchema,
   ListMyOrdersInputSchema,
   ListAllOrdersInputSchema,
+  CancelOrderInputSchema,
+  ShipOrderInputSchema,
+  DeliverOrderInputSchema,
   type ListMyOrdersInput,
 } from './dto/order.dto';
 import type { Identity } from '../identity/identity.util';
+import { OrderStateMachine, type TransitionTrigger } from './order-state-machine';
 
 export interface CreateOrderInput {
   userId: string;
@@ -43,6 +47,7 @@ export class OrderService {
     private readonly products: ProductGrpcClient,
     private readonly users: UserGrpcClient,
     private readonly timeouts: GrpcCallTimeouts,
+    private readonly stateMachine: OrderStateMachine,
   ) {}
 
   async createOrder(input: CreateOrderInput): Promise<OrderWithItems> {
@@ -167,6 +172,94 @@ export class OrderService {
     if (input.status) where.status = input.status;
     if (input.userId) where.userId = input.userId;
     return this.paginateOrders(input.pagination, where);
+  }
+
+  async cancelOrder(raw: unknown, identity: Identity): Promise<OrderWithItems> {
+    const input = parse(CancelOrderInputSchema, raw, 'CancelOrder');
+
+    return this.transitionOrder(
+      input.orderId,
+      identity,
+      'cancel',
+      TOPICS.ORDER_CANCELLED,
+      (userId) => ({ orderId: input.orderId, userId, reason: input.reason }),
+      input.reason,
+      false,
+    );
+  }
+
+  async shipOrder(raw: unknown, identity: Identity): Promise<OrderWithItems> {
+    const input = parse(ShipOrderInputSchema, raw, 'ShipOrder');
+
+    return this.transitionOrder(
+      input.orderId,
+      identity,
+      'ship',
+      TOPICS.ORDER_SHIPPED,
+      (userId) => ({ orderId: input.orderId, userId }),
+      undefined,
+      true,
+    );
+  }
+
+  async deliverOrder(raw: unknown, identity: Identity): Promise<OrderWithItems> {
+    const input = parse(DeliverOrderInputSchema, raw, 'DeliverOrder');
+
+    return this.transitionOrder(
+      input.orderId,
+      identity,
+      'deliver',
+      TOPICS.ORDER_DELIVERED,
+      (userId) => ({ orderId: input.orderId, userId }),
+      undefined,
+      true,
+    );
+  }
+
+  private async transitionOrder<T extends TopicName>(
+    orderId: string,
+    identity: Identity,
+    trigger: TransitionTrigger,
+    topic: T,
+    buildPayload: (userId: string) => EventPayloadMap[T],
+    reason?: string,
+    adminOnly?: boolean,
+  ): Promise<OrderWithItems> {
+    if (adminOnly) {
+      if (identity.role !== 'ADMIN') {
+        throw new PermissionDeniedError('Admin role required');
+      }
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const order = await tx.order.findUnique({
+        where: { id: orderId },
+        select: { userId: true },
+      });
+
+      if (!order) {
+        throw new NotFoundError('Order not found');
+      }
+
+      if (!adminOnly && identity.role !== 'ADMIN' && order.userId !== identity.userId) {
+        throw new PermissionDeniedError('You do not own this order');
+      }
+
+      await this.stateMachine.transition(tx, orderId, trigger, reason);
+
+      await this.outbox.enqueue(tx, {
+        aggregateType: 'Order',
+        aggregateId: orderId,
+        topic,
+        payload: buildPayload(order.userId),
+        correlationId: identity.requestId,
+      });
+
+      return tx.order.findUniqueOrThrow({
+        where: { id: orderId },
+        include: { items: true },
+      });
+    });
   }
 
   private async paginateOrders(

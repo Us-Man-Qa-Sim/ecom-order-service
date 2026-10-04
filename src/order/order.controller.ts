@@ -1,6 +1,4 @@
 import { Controller, UseFilters } from '@nestjs/common';
-import { RpcException } from '@nestjs/microservices';
-import { status } from '@grpc/grpc-js';
 import type { Metadata } from '@grpc/grpc-js';
 import {
   CancelOrderRequest,
@@ -25,10 +23,6 @@ import { readIdentity, requireAdmin } from '../identity/identity.util';
 import { ValidationError } from '../common/errors/domain-errors';
 import { OrderService } from './order.service';
 import { toProtoOrder } from './order.mapper';
-
-function unimplemented(rpc: string): never {
-  throw new RpcException({ code: status.UNIMPLEMENTED, message: `${rpc} not implemented yet` });
-}
 
 @Controller()
 @OrderServiceControllerMethods()
@@ -106,15 +100,32 @@ export class OrderController implements OrderServiceController {
     };
   }
 
-  cancelOrder(_request: CancelOrderRequest): Promise<CancelOrderResponse> {
-    unimplemented('CancelOrder');
+  async cancelOrder(
+    request: CancelOrderRequest,
+    metadata?: Metadata,
+  ): Promise<CancelOrderResponse> {
+    const identity = readIdentity(metadata);
+    const order = await this.orderService.cancelOrder(request, identity);
+    return { order: toProtoOrder(order) };
   }
 
-  shipOrder(_request: ShipOrderRequest): Promise<ShipOrderResponse> {
-    unimplemented('ShipOrder');
+  async shipOrder(
+    request: ShipOrderRequest,
+    metadata?: Metadata,
+  ): Promise<ShipOrderResponse> {
+    const identity = readIdentity(metadata);
+    requireAdmin(identity);
+    const order = await this.orderService.shipOrder(request, identity);
+    return { order: toProtoOrder(order) };
   }
 
-  deliverOrder(_request: DeliverOrderRequest): Promise<DeliverOrderResponse> {
-    unimplemented('DeliverOrder');
+  async deliverOrder(
+    request: DeliverOrderRequest,
+    metadata?: Metadata,
+  ): Promise<DeliverOrderResponse> {
+    const identity = readIdentity(metadata);
+    requireAdmin(identity);
+    const order = await this.orderService.deliverOrder(request, identity);
+    return { order: toProtoOrder(order) };
   }
 }

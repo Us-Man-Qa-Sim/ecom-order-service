@@ -52,3 +52,19 @@ export const ListAllOrdersInputSchema = z.object({
   userId: z.string().trim().min(1).optional(),
 });
 export type ListAllOrdersInput = z.infer<typeof ListAllOrdersInputSchema>;
+
+export const CancelOrderInputSchema = z.object({
+  orderId: UUID,
+  reason: z.string().max(500).optional(),
+});
+export type CancelOrderInput = z.infer<typeof CancelOrderInputSchema>;
+
+export const ShipOrderInputSchema = z.object({
+  orderId: UUID,
+});
+export type ShipOrderInput = z.infer<typeof ShipOrderInputSchema>;
+
+export const DeliverOrderInputSchema = z.object({
+  orderId: UUID,
+});
+export type DeliverOrderInput = z.infer<typeof DeliverOrderInputSchema>;
