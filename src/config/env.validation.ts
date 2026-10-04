@@ -38,6 +38,10 @@ export const envSchema = z.object({
 
   USER_SERVICE_URL: z.string().default('localhost:5001'),
   PRODUCT_SERVICE_URL: z.string().default('localhost:5002'),
+
+  GRPC_TIMEOUT_FAST_MS: numericString(2_000),
+  GRPC_TIMEOUT_STANDARD_MS: numericString(5_000),
+  GRPC_TIMEOUT_LONG_MS: numericString(10_000),
 });
 
 export type Env = z.infer<typeof envSchema>;
