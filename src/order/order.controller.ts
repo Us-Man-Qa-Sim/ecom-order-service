@@ -21,7 +21,7 @@ import {
   ShipOrderResponse,
 } from '@us-man-qa-sim/ecom-contracts/generated/order';
 import { GrpcExceptionFilter } from '../common/errors/grpc-exception.filter';
-import { readIdentity } from '../identity/identity.util';
+import { readIdentity, requireAdmin } from '../identity/identity.util';
 import { ValidationError } from '../common/errors/domain-errors';
 import { OrderService } from './order.service';
 import { toProtoOrder } from './order.mapper';
@@ -62,16 +62,48 @@ export class OrderController implements OrderServiceController {
     return { order: toProtoOrder(order) };
   }
 
-  getOrder(_request: GetOrderRequest): Promise<GetOrderResponse> {
-    unimplemented('GetOrder');
+  async getOrder(
+    request: GetOrderRequest,
+    metadata?: Metadata,
+  ): Promise<GetOrderResponse> {
+    const identity = readIdentity(metadata);
+    const order = await this.orderService.getOrder(request, identity);
+    return { order: toProtoOrder(order) };
   }
 
-  listMyOrders(_request: ListMyOrdersRequest): Promise<ListMyOrdersResponse> {
-    unimplemented('ListMyOrders');
+  async listMyOrders(
+    request: ListMyOrdersRequest,
+    metadata?: Metadata,
+  ): Promise<ListMyOrdersResponse> {
+    const identity = readIdentity(metadata);
+    const result = await this.orderService.listMyOrders(request, identity.userId);
+    return {
+      orders: result.orders.map(toProtoOrder),
+      pagination: {
+        total: result.total,
+        page: result.page,
+        pageSize: result.pageSize,
+        totalPages: result.totalPages,
+      },
+    };
   }
 
-  listAllOrders(_request: ListAllOrdersRequest): Promise<ListAllOrdersResponse> {
-    unimplemented('ListAllOrders');
+  async listAllOrders(
+    request: ListAllOrdersRequest,
+    metadata?: Metadata,
+  ): Promise<ListAllOrdersResponse> {
+    const identity = readIdentity(metadata);
+    requireAdmin(identity);
+    const result = await this.orderService.listAllOrders(request);
+    return {
+      orders: result.orders.map(toProtoOrder),
+      pagination: {
+        total: result.total,
+        page: result.page,
+        pageSize: result.pageSize,
+        totalPages: result.totalPages,
+      },
+    };
   }
 
   cancelOrder(_request: CancelOrderRequest): Promise<CancelOrderResponse> {

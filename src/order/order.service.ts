@@ -3,12 +3,20 @@ import { Order as PrismaOrder, OrderItem as PrismaOrderItem, Prisma } from '@pri
 import { TOPICS } from '@us-man-qa-sim/ecom-contracts/events';
 import type { Product } from '@us-man-qa-sim/ecom-contracts/generated/product';
 import type { Address } from '@us-man-qa-sim/ecom-contracts/generated/user';
+import type { ZodType } from 'zod';
 import { PrismaService } from '../prisma/prisma.service';
 import { OutboxService } from '../outbox/outbox.service';
 import { ProductGrpcClient } from '../grpc/product.client';
 import { UserGrpcClient } from '../grpc/user.client';
 import { callGrpc, GrpcCallTimeouts } from '../grpc/grpc-call.util';
-import { NotFoundError, ValidationError } from '../common/errors/domain-errors';
+import { NotFoundError, PermissionDeniedError, ValidationError } from '../common/errors/domain-errors';
+import {
+  GetOrderInputSchema,
+  ListMyOrdersInputSchema,
+  ListAllOrdersInputSchema,
+  type ListMyOrdersInput,
+} from './dto/order.dto';
+import type { Identity } from '../identity/identity.util';
 
 export interface CreateOrderInput {
   userId: string;
@@ -17,7 +25,15 @@ export interface CreateOrderInput {
   correlationId?: string;
 }
 
-type OrderWithItems = PrismaOrder & { items: PrismaOrderItem[] };
+export type OrderWithItems = PrismaOrder & { items: PrismaOrderItem[] };
+
+export interface PaginatedOrders {
+  orders: OrderWithItems[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
 
 @Injectable()
 export class OrderService {
@@ -124,6 +140,67 @@ export class OrderService {
       return order;
     });
   }
+
+  async getOrder(raw: unknown, identity: Identity): Promise<OrderWithItems> {
+    const input = parse(GetOrderInputSchema, raw, 'GetOrder');
+    const order = await this.prisma.order.findUnique({
+      where: { id: input.orderId },
+      include: { items: true },
+    });
+    if (!order) {
+      throw new NotFoundError('Order not found');
+    }
+    if (identity.role !== 'ADMIN' && order.userId !== identity.userId) {
+      throw new PermissionDeniedError('You do not own this order');
+    }
+    return order;
+  }
+
+  async listMyOrders(raw: unknown, userId: string): Promise<PaginatedOrders> {
+    const input = parse(ListMyOrdersInputSchema, raw, 'ListMyOrders');
+    return this.paginateOrders(input.pagination, { userId, status: input.status });
+  }
+
+  async listAllOrders(raw: unknown): Promise<PaginatedOrders> {
+    const input = parse(ListAllOrdersInputSchema, raw, 'ListAllOrders');
+    const where: Prisma.OrderWhereInput = {};
+    if (input.status) where.status = input.status;
+    if (input.userId) where.userId = input.userId;
+    return this.paginateOrders(input.pagination, where);
+  }
+
+  private async paginateOrders(
+    pagination: ListMyOrdersInput['pagination'],
+    where: Prisma.OrderWhereInput,
+  ): Promise<PaginatedOrders> {
+    const { page, pageSize } = pagination;
+    const skip = (page - 1) * pageSize;
+
+    const [total, orders] = await Promise.all([
+      this.prisma.order.count({ where }),
+      this.prisma.order.findMany({
+        where,
+        include: { items: true },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: pageSize,
+      }),
+    ]);
+
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    return { orders, total, page, pageSize, totalPages };
+  }
+}
+
+function parse<T>(schema: ZodType<T>, raw: unknown, rpc: string): T {
+  const parsed = schema.safeParse(raw);
+  if (!parsed.success) {
+    const message = parsed.error.issues
+      .map((i) => `${i.path.join('.') || '<root>'}: ${i.message}`)
+      .join('; ');
+    throw new ValidationError(`Invalid ${rpc} request: ${message}`);
+  }
+  return parsed.data;
 }
 
 function toShippingSnapshot(address: Address): Prisma.InputJsonValue {
