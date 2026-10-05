@@ -28,11 +28,15 @@ jest.mock('@confluentinc/kafka-javascript', () => ({
   },
 }));
 
-function makeConfig(): ConfigService<Env, true> {
+function makeConfig(overrides: Record<string, unknown> = {}): ConfigService<Env, true> {
   const values: Record<string, unknown> = {
     KAFKA_BROKERS: 'localhost:9092',
     KAFKA_CLIENT_ID: 'order-service',
     KAFKA_CONSUMER_GROUP_ID: 'order-service',
+    KAFKA_CONSUMER_MAX_RETRIES: 3,
+    KAFKA_CONSUMER_RETRY_BASE_MS: 10,
+    KAFKA_CONSUMER_RETRY_MAX_MS: 100,
+    ...overrides,
   };
   return { get: (k: string) => values[k] } as unknown as ConfigService<Env, true>;
 }
@@ -122,27 +126,77 @@ describe('KafkaConsumerService', () => {
     ]);
   });
 
-  it('does NOT commit when the handler throws', async () => {
-    const handle = jest.fn().mockRejectedValueOnce(new Error('processing failed'));
-    service.subscribe(TOPICS.ORDER_STOCK_RESERVED, { handle });
-    await service.onApplicationBootstrap();
+  describe('retry with backoff', () => {
+    let handle: jest.Mock;
 
-    const envelope = validEnvelope(TOPICS.ORDER_STOCK_RESERVED);
-    await expect(
-      capturedEachMessage!({
-        topic: TOPICS.ORDER_STOCK_RESERVED,
-        partition: 0,
-        message: {
-          key: Buffer.from('key'),
-          value: Buffer.from(JSON.stringify(envelope)),
-          timestamp: Date.now().toString(),
-          attributes: 0,
-          offset: '7',
-          headers: {},
+    beforeEach(async () => {
+      handle = jest.fn();
+      service.subscribe(TOPICS.ORDER_STOCK_RESERVED, { handle });
+      await service.onApplicationBootstrap();
+    });
+
+    function stockReservedMessage(offset = '7') {
+      const envelope = validEnvelope(TOPICS.ORDER_STOCK_RESERVED);
+      return {
+        envelope,
+        msg: {
+          topic: TOPICS.ORDER_STOCK_RESERVED,
+          partition: 0,
+          message: {
+            key: Buffer.from('key'),
+            value: Buffer.from(JSON.stringify(envelope)),
+            timestamp: Date.now().toString(),
+            attributes: 0,
+            offset,
+            headers: {},
+          },
         },
-      }),
-    ).rejects.toThrow('processing failed');
+      };
+    }
 
-    expect(commitOffsets).not.toHaveBeenCalled();
+    it('retries and succeeds on second attempt', async () => {
+      handle
+        .mockRejectedValueOnce(new Error('transient'))
+        .mockResolvedValueOnce(undefined);
+      const { msg } = stockReservedMessage();
+
+      await capturedEachMessage!(msg);
+
+      expect(handle).toHaveBeenCalledTimes(2);
+      expect(commitOffsets).toHaveBeenCalledTimes(1);
+      expect(commitOffsets).toHaveBeenCalledWith([
+        { topic: TOPICS.ORDER_STOCK_RESERVED, partition: 0, offset: '8' },
+      ]);
+    });
+
+    it('commits as poison message after exhausting all retries', async () => {
+      handle.mockRejectedValue(new Error('persistent failure'));
+      const { msg } = stockReservedMessage();
+
+      await capturedEachMessage!(msg);
+
+      expect(handle).toHaveBeenCalledTimes(3);
+      expect(commitOffsets).toHaveBeenCalledTimes(1);
+      expect(commitOffsets).toHaveBeenCalledWith([
+        { topic: TOPICS.ORDER_STOCK_RESERVED, partition: 0, offset: '8' },
+      ]);
+    });
+
+    it('applies backoff delay between retries', async () => {
+      handle
+        .mockRejectedValueOnce(new Error('fail'))
+        .mockResolvedValueOnce(undefined);
+      const sleepSpy = jest.spyOn(service as any, 'sleep').mockResolvedValue(undefined);
+      const { msg } = stockReservedMessage();
+
+      await capturedEachMessage!(msg);
+
+      expect(sleepSpy).toHaveBeenCalledTimes(1);
+      const delay = sleepSpy.mock.calls[0][0] as number;
+      expect(delay).toBeGreaterThanOrEqual(10);
+      expect(delay).toBeLessThanOrEqual(12);
+
+      sleepSpy.mockRestore();
+    });
   });
 });

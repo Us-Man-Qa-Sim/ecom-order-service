@@ -10,6 +10,9 @@ export class KafkaConsumerService implements OnApplicationBootstrap, OnApplicati
   private readonly logger = new Logger(KafkaConsumerService.name);
   private readonly kafka: KafkaJS.Kafka;
   private readonly groupId: string;
+  private readonly maxRetries: number;
+  private readonly retryBaseMs: number;
+  private readonly retryMaxMs: number;
   private readonly handlers = new Map<string, TopicHandler>();
   private consumer?: KafkaJS.Consumer;
 
@@ -17,6 +20,9 @@ export class KafkaConsumerService implements OnApplicationBootstrap, OnApplicati
     const brokers = config.get('KAFKA_BROKERS', { infer: true }).split(',');
     const clientId = config.get('KAFKA_CLIENT_ID', { infer: true });
     this.groupId = config.get('KAFKA_CONSUMER_GROUP_ID', { infer: true });
+    this.maxRetries = config.get('KAFKA_CONSUMER_MAX_RETRIES', { infer: true });
+    this.retryBaseMs = config.get('KAFKA_CONSUMER_RETRY_BASE_MS', { infer: true });
+    this.retryMaxMs = config.get('KAFKA_CONSUMER_RETRY_MAX_MS', { infer: true });
     this.kafka = new KafkaJS.Kafka({ kafkaJS: { brokers, clientId } });
   }
 
@@ -101,8 +107,47 @@ export class KafkaConsumerService implements OnApplicationBootstrap, OnApplicati
       return;
     }
 
-    await handler.handle(event);
-    await this.commit(topic, partition, message.offset);
+    for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
+      try {
+        await handler.handle(event);
+        await this.commit(topic, partition, message.offset);
+        return;
+      } catch (err) {
+        if (attempt < this.maxRetries) {
+          const delay = this.backoffDelay(attempt);
+          this.logger.warn(
+            { err, topic, partition, offset: message.offset, attempt, maxRetries: this.maxRetries, nextRetryMs: delay },
+            'Handler failed, retrying after backoff',
+          );
+          await this.sleep(delay);
+        } else {
+          this.logger.error(
+            {
+              err,
+              topic,
+              partition,
+              offset: message.offset,
+              attempts: this.maxRetries,
+              eventId: event.eventId,
+              correlationId: event.correlationId,
+            },
+            'Poison message: handler failed after all retries, skipping',
+          );
+          await this.commit(topic, partition, message.offset);
+        }
+      }
+    }
+  }
+
+  private backoffDelay(attempt: number): number {
+    const exponential = this.retryBaseMs * 2 ** (attempt - 1);
+    const capped = Math.min(exponential, this.retryMaxMs);
+    const jitter = Math.random() * capped * 0.2;
+    return Math.floor(capped + jitter);
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   private async commit(topic: string, partition: number, offset: string): Promise<void> {
