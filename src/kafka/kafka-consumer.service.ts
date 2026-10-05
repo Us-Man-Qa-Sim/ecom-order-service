@@ -43,13 +43,17 @@ export class KafkaConsumerService implements OnApplicationBootstrap, OnApplicati
       return;
     }
 
+    // fromBeginning: a brand-new consumer group (first deploy, or a group that
+    // was reset) starts at the earliest offset instead of `latest`, so events
+    // produced before this service first joined are not silently skipped.
+    // Once the group has committed offsets this setting has no effect.
     this.consumer = this.kafka.consumer({
-      kafkaJS: { groupId: this.groupId, autoCommit: false },
+      kafkaJS: { groupId: this.groupId, autoCommit: false, fromBeginning: true },
     });
     await this.consumer.connect();
 
     const topics = [...this.handlers.keys()];
-    await this.consumer.subscribe({ topics, fromBeginning: false });
+    await this.consumer.subscribe({ topics });
 
     await this.consumer.run({
       eachMessage: async ({ topic, partition, message }) => {
@@ -82,7 +86,10 @@ export class KafkaConsumerService implements OnApplicationBootstrap, OnApplicati
 
     const raw = message.value?.toString();
     if (!raw) {
-      this.logger.warn({ topic, partition, offset: message.offset }, 'Empty message value, skipping');
+      this.logger.warn(
+        { topic, partition, offset: message.offset },
+        'Empty message value, skipping',
+      );
       await this.commit(topic, partition, message.offset);
       return;
     }
@@ -121,7 +128,15 @@ export class KafkaConsumerService implements OnApplicationBootstrap, OnApplicati
           if (attempt < this.maxRetries) {
             const delay = this.backoffDelay(attempt);
             this.logger.warn(
-              { err, topic, partition, offset: message.offset, attempt, maxRetries: this.maxRetries, nextRetryMs: delay },
+              {
+                err,
+                topic,
+                partition,
+                offset: message.offset,
+                attempt,
+                maxRetries: this.maxRetries,
+                nextRetryMs: delay,
+              },
               'Handler failed, retrying after backoff',
             );
             await this.sleep(delay);
@@ -157,8 +172,6 @@ export class KafkaConsumerService implements OnApplicationBootstrap, OnApplicati
   }
 
   private async commit(topic: string, partition: number, offset: string): Promise<void> {
-    await this.consumer!.commitOffsets([
-      { topic, partition, offset: String(Number(offset) + 1) },
-    ]);
+    await this.consumer!.commitOffsets([{ topic, partition, offset: String(Number(offset) + 1) }]);
   }
 }

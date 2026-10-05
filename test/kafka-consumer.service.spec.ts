@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { ConfigService } from '@nestjs/config';
+import { KafkaJS } from '@confluentinc/kafka-javascript';
 import type { Env } from '../src/config/env.validation';
 import { CorrelationService } from '../src/correlation/correlation.service';
 import { KafkaConsumerService } from '../src/kafka/kafka-consumer.service';
-import type { TopicHandler } from '../src/kafka/consumer';
 import { TOPICS } from '@us-man-qa-sim/ecom-contracts/events';
 
 const commitOffsets = jest.fn();
@@ -28,6 +28,17 @@ jest.mock('@confluentinc/kafka-javascript', () => ({
     })),
   },
 }));
+
+// Manual commits (inbox + at-least-once) and earliest offset for a new group,
+// so events produced before the first deploy of this service are not skipped.
+function expectConsumerConfig(): void {
+  const kafka = (KafkaJS.Kafka as unknown as jest.Mock).mock.results.at(-1)!.value as {
+    consumer: jest.Mock;
+  };
+  expect(kafka.consumer).toHaveBeenCalledWith({
+    kafkaJS: { groupId: 'order-service', autoCommit: false, fromBeginning: true },
+  });
+}
 
 function makeConfig(overrides: Record<string, unknown> = {}): ConfigService<Env, true> {
   const values: Record<string, unknown> = {
@@ -70,9 +81,9 @@ describe('KafkaConsumerService', () => {
     expect(consumerConnect).toHaveBeenCalledTimes(1);
     expect(consumerSubscribe).toHaveBeenCalledWith({
       topics: [TOPICS.ORDER_STOCK_RESERVED, TOPICS.ORDER_STOCK_RESERVATION_FAILED],
-      fromBeginning: false,
     });
     expect(consumerRun).toHaveBeenCalled();
+    expectConsumerConfig();
   });
 
   it('validates the envelope and calls the handler on a valid message', async () => {
@@ -95,9 +106,7 @@ describe('KafkaConsumerService', () => {
     });
 
     expect(handle).toHaveBeenCalledTimes(1);
-    expect(handle).toHaveBeenCalledWith(
-      expect.objectContaining({ eventId: envelope.eventId }),
-    );
+    expect(handle).toHaveBeenCalledWith(expect.objectContaining({ eventId: envelope.eventId }));
     expect(commitOffsets).toHaveBeenCalledWith([
       { topic: TOPICS.ORDER_STOCK_RESERVED, partition: 0, offset: '11' },
     ]);
@@ -156,9 +165,7 @@ describe('KafkaConsumerService', () => {
     }
 
     it('retries and succeeds on second attempt', async () => {
-      handle
-        .mockRejectedValueOnce(new Error('transient'))
-        .mockResolvedValueOnce(undefined);
+      handle.mockRejectedValueOnce(new Error('transient')).mockResolvedValueOnce(undefined);
       const { msg } = stockReservedMessage();
 
       await capturedEachMessage!(msg);
@@ -184,9 +191,7 @@ describe('KafkaConsumerService', () => {
     });
 
     it('applies backoff delay between retries', async () => {
-      handle
-        .mockRejectedValueOnce(new Error('fail'))
-        .mockResolvedValueOnce(undefined);
+      handle.mockRejectedValueOnce(new Error('fail')).mockResolvedValueOnce(undefined);
       const sleepSpy = jest.spyOn(service as any, 'sleep').mockResolvedValue(undefined);
       const { msg } = stockReservedMessage();
 

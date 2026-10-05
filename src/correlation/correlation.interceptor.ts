@@ -18,8 +18,7 @@ export class CorrelationInterceptor implements NestInterceptor {
     const metadata: Metadata | undefined = context.switchToRpc().getContext();
     const values = metadata?.get(HEADER_REQUEST_ID);
     const raw = values?.[0];
-    const correlationId =
-      typeof raw === 'string' ? raw : (raw?.toString('utf8') ?? randomUUID());
+    const correlationId = typeof raw === 'string' ? raw : (raw?.toString('utf8') ?? randomUUID());
 
     return new Observable((subscriber) => {
       this.correlation.run({ correlationId }, () => {

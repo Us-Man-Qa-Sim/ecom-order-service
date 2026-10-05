@@ -30,8 +30,7 @@ export class OutboxService {
       eventType: event.topic,
       version: 1,
       occurredAt: new Date().toISOString(),
-      correlationId:
-        event.correlationId ?? this.correlation.getCorrelationId() ?? randomUUID(),
+      correlationId: event.correlationId ?? this.correlation.getCorrelationId() ?? randomUUID(),
       payload: parsedPayload as EventPayloadMap[T],
     };
 

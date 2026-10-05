@@ -4,6 +4,7 @@ import { TOPICS, type TypedEventEnvelope } from '@us-man-qa-sim/ecom-contracts/e
 import { PrismaService } from '../../prisma/prisma.service';
 import { OutboxService } from '../../outbox/outbox.service';
 import { OrderStateMachine } from '../../order/order-state-machine';
+import { applyIfPending } from './apply-if-pending';
 import type { TopicHandler } from '../consumer';
 import { KafkaConsumerService } from '../kafka-consumer.service';
 
@@ -29,28 +30,34 @@ export class StockReservationFailedHandler
     const { orderId, reason } = payload;
 
     try {
-      await this.prisma.$transaction(async (tx) => {
+      const applied = await this.prisma.$transaction(async (tx) => {
         await tx.processedEvent.create({
           data: { eventId, eventType: TOPICS.ORDER_STOCK_RESERVATION_FAILED },
         });
 
-        const { userId } = await this.stateMachine.transition(
-          tx,
-          orderId,
-          'stock_reservation_failed',
-          { reason },
+        const result = await applyIfPending(() =>
+          this.stateMachine.transition(tx, orderId, 'stock_reservation_failed', { reason }),
         );
+        if (!result) return false;
 
         await this.outbox.enqueue(tx, {
           aggregateType: 'Order',
           aggregateId: orderId,
           topic: TOPICS.ORDER_CANCELLED,
-          payload: { orderId, userId, reason },
+          payload: { orderId, userId: result.userId, reason },
           correlationId,
         });
+        return true;
       });
 
-      this.logger.log({ orderId, reason }, 'Order cancelled (stock reservation failed)');
+      if (applied) {
+        this.logger.log({ orderId, reason }, 'Order cancelled (stock reservation failed)');
+      } else {
+        this.logger.warn(
+          { orderId, eventId },
+          'Stale stock result: order is no longer PENDING (e.g. cancelled while the reservation was in flight), ignoring',
+        );
+      }
     } catch (err: unknown) {
       if (isDuplicateEvent(err)) {
         this.logger.log({ eventId }, 'Duplicate event, skipping');
@@ -62,7 +69,5 @@ export class StockReservationFailedHandler
 }
 
 function isDuplicateEvent(err: unknown): boolean {
-  return (
-    err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002'
-  );
+  return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
 }

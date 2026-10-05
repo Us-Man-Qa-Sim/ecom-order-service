@@ -83,17 +83,13 @@ export class OutboxRelayService implements OnApplicationBootstrap, OnModuleDestr
       for (const row of rows) {
         const envelope = row.payload as Record<string, unknown>;
         const correlationId =
-          typeof envelope.correlationId === 'string'
-            ? envelope.correlationId
-            : undefined;
+          typeof envelope.correlationId === 'string' ? envelope.correlationId : undefined;
 
         await this.publisher.publish({
           topic: row.event_type,
           key: row.aggregate_id,
           value: JSON.stringify(row.payload),
-          headers: correlationId
-            ? { 'x-correlation-id': correlationId }
-            : undefined,
+          headers: correlationId ? { 'x-correlation-id': correlationId } : undefined,
         });
       }
 

@@ -4,13 +4,12 @@ import { TOPICS, type TypedEventEnvelope } from '@us-man-qa-sim/ecom-contracts/e
 import { PrismaService } from '../../prisma/prisma.service';
 import { OutboxService } from '../../outbox/outbox.service';
 import { OrderStateMachine } from '../../order/order-state-machine';
+import { applyIfPending } from './apply-if-pending';
 import type { TopicHandler } from '../consumer';
 import { KafkaConsumerService } from '../kafka-consumer.service';
 
 @Injectable()
-export class StockReservedHandler
-  implements TopicHandler<'order.stock-reserved'>, OnModuleInit
-{
+export class StockReservedHandler implements TopicHandler<'order.stock-reserved'>, OnModuleInit {
   private readonly logger = new Logger(StockReservedHandler.name);
 
   constructor(
@@ -29,27 +28,34 @@ export class StockReservedHandler
     const { orderId } = payload;
 
     try {
-      await this.prisma.$transaction(async (tx) => {
+      const applied = await this.prisma.$transaction(async (tx) => {
         await tx.processedEvent.create({
           data: { eventId, eventType: TOPICS.ORDER_STOCK_RESERVED },
         });
 
-        const { userId } = await this.stateMachine.transition(
-          tx,
-          orderId,
-          'stock_reserved',
+        const result = await applyIfPending(() =>
+          this.stateMachine.transition(tx, orderId, 'stock_reserved'),
         );
+        if (!result) return false;
 
         await this.outbox.enqueue(tx, {
           aggregateType: 'Order',
           aggregateId: orderId,
           topic: TOPICS.ORDER_CONFIRMED,
-          payload: { orderId, userId },
+          payload: { orderId, userId: result.userId },
           correlationId,
         });
+        return true;
       });
 
-      this.logger.log({ orderId }, 'Order confirmed');
+      if (applied) {
+        this.logger.log({ orderId }, 'Order confirmed');
+      } else {
+        this.logger.warn(
+          { orderId, eventId },
+          'Stale stock result: order is no longer PENDING (e.g. cancelled while the reservation was in flight), ignoring',
+        );
+      }
     } catch (err: unknown) {
       if (isDuplicateEvent(err)) {
         this.logger.log({ eventId }, 'Duplicate event, skipping');
@@ -61,7 +67,5 @@ export class StockReservedHandler
 }
 
 function isDuplicateEvent(err: unknown): boolean {
-  return (
-    err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002'
-  );
+  return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
 }

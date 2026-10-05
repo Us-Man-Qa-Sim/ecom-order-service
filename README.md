@@ -15,6 +15,12 @@ Order management microservice for the ecom platform. Exposes a gRPC API (`ecom.o
 | ORD-7 CancelOrder / ShipOrder / DeliverOrder  | Done   |
 | ORD-8 Outbox relay                            | Done   |
 | ORD-9 Tests                                   | Done   |
+| KFK-1 Kafka consumer wrapper                  | Done   |
+| KFK-4 Consume stock results                   | Done   |
+| KFK-8 Consumer retry + poison logging         | Done   |
+| KFK-9 correlationId propagation               | Done   |
+
+Kafka (`KFK-4`): `order.stock-reserved` moves the order `PENDING → CONFIRMED` and enqueues `order.confirmed`. `order.stock-reservation-failed` moves it `PENDING → CANCELLED` and enqueues `order.cancelled`. Each handler writes the inbox row (`processed_events`), the transition and the outbox event in one Prisma transaction. A result for an order that has already left `PENDING` (for example, the user cancelled while stock was being reserved) is recorded in the inbox and ignored, not retried. product-service releases the stock when it consumes that `order.cancelled`.
 
 ## Responsibilities
 
@@ -85,6 +91,10 @@ npm run start:dev
 | `DATABASE_URL`                  | —                | Postgres connection string (required) |
 | `KAFKA_BROKERS`                 | `localhost:9092` | Kafka bootstrap servers               |
 | `KAFKA_CLIENT_ID`               | `order-service`  | Kafka client identifier               |
+| `KAFKA_CONSUMER_GROUP_ID`       | `order-service`  | Consumer group for stock results      |
+| `KAFKA_CONSUMER_MAX_RETRIES`    | `5`              | Handler attempts before poison skip   |
+| `KAFKA_CONSUMER_RETRY_BASE_MS`  | `1000`           | First retry backoff (doubles)         |
+| `KAFKA_CONSUMER_RETRY_MAX_MS`   | `30000`          | Backoff cap                           |
 | `OUTBOX_RELAY_ENABLED`          | `true`           | Enable outbox relay polling           |
 | `OUTBOX_RELAY_POLL_INTERVAL_MS` | `250`            | Relay poll interval                   |
 | `OUTBOX_RELAY_BATCH_SIZE`       | `32`             | Rows per relay tick                   |
