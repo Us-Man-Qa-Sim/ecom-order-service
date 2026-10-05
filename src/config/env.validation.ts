@@ -27,6 +27,7 @@ export const envSchema = z.object({
 
   KAFKA_BROKERS: z.string().default('localhost:9092'),
   KAFKA_CLIENT_ID: z.string().default('order-service'),
+  KAFKA_CONSUMER_GROUP_ID: z.string().default('order-service'),
 
   OUTBOX_RELAY_ENABLED: z
     .enum(['true', 'false'])
