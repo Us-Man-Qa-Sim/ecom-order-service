@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { KafkaJS } from '@confluentinc/kafka-javascript';
 import { parseEvent, type TopicName } from '@us-man-qa-sim/ecom-contracts/events';
 import type { Env } from '../config/env.validation';
+import { CorrelationService } from '../correlation/correlation.service';
 import type { TopicHandler } from './consumer';
 
 @Injectable()
@@ -16,7 +17,10 @@ export class KafkaConsumerService implements OnApplicationBootstrap, OnApplicati
   private readonly handlers = new Map<string, TopicHandler>();
   private consumer?: KafkaJS.Consumer;
 
-  constructor(config: ConfigService<Env, true>) {
+  constructor(
+    config: ConfigService<Env, true>,
+    private readonly correlation: CorrelationService,
+  ) {
     const brokers = config.get('KAFKA_BROKERS', { infer: true }).split(',');
     const clientId = config.get('KAFKA_CLIENT_ID', { infer: true });
     this.groupId = config.get('KAFKA_CONSUMER_GROUP_ID', { infer: true });
@@ -107,36 +111,38 @@ export class KafkaConsumerService implements OnApplicationBootstrap, OnApplicati
       return;
     }
 
-    for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
-      try {
-        await handler.handle(event);
-        await this.commit(topic, partition, message.offset);
-        return;
-      } catch (err) {
-        if (attempt < this.maxRetries) {
-          const delay = this.backoffDelay(attempt);
-          this.logger.warn(
-            { err, topic, partition, offset: message.offset, attempt, maxRetries: this.maxRetries, nextRetryMs: delay },
-            'Handler failed, retrying after backoff',
-          );
-          await this.sleep(delay);
-        } else {
-          this.logger.error(
-            {
-              err,
-              topic,
-              partition,
-              offset: message.offset,
-              attempts: this.maxRetries,
-              eventId: event.eventId,
-              correlationId: event.correlationId,
-            },
-            'Poison message: handler failed after all retries, skipping',
-          );
+    await this.correlation.run({ correlationId: event.correlationId }, async () => {
+      for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
+        try {
+          await handler.handle(event);
           await this.commit(topic, partition, message.offset);
+          return;
+        } catch (err) {
+          if (attempt < this.maxRetries) {
+            const delay = this.backoffDelay(attempt);
+            this.logger.warn(
+              { err, topic, partition, offset: message.offset, attempt, maxRetries: this.maxRetries, nextRetryMs: delay },
+              'Handler failed, retrying after backoff',
+            );
+            await this.sleep(delay);
+          } else {
+            this.logger.error(
+              {
+                err,
+                topic,
+                partition,
+                offset: message.offset,
+                attempts: this.maxRetries,
+                eventId: event.eventId,
+                correlationId: event.correlationId,
+              },
+              'Poison message: handler failed after all retries, skipping',
+            );
+            await this.commit(topic, partition, message.offset);
+          }
         }
       }
-    }
+    });
   }
 
   private backoffDelay(attempt: number): number {

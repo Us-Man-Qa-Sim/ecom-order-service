@@ -7,9 +7,12 @@ import {
   TopicName,
   TypedEventEnvelope,
 } from '@us-man-qa-sim/ecom-contracts/events';
+import { CorrelationService } from '../correlation/correlation.service';
 
 @Injectable()
 export class OutboxService {
+  constructor(private readonly correlation: CorrelationService) {}
+
   async enqueue<T extends TopicName>(
     tx: Prisma.TransactionClient,
     event: {
@@ -27,7 +30,8 @@ export class OutboxService {
       eventType: event.topic,
       version: 1,
       occurredAt: new Date().toISOString(),
-      correlationId: event.correlationId ?? randomUUID(),
+      correlationId:
+        event.correlationId ?? this.correlation.getCorrelationId() ?? randomUUID(),
       payload: parsedPayload as EventPayloadMap[T],
     };
 
