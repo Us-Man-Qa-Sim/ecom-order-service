@@ -21,7 +21,10 @@ export class GrpcExceptionFilter implements RpcExceptionFilter {
   private readonly logger = new Logger(GrpcExceptionFilter.name);
 
   catch(exception: unknown, _host: ArgumentsHost): Observable<never> {
-    return throwError(() => this.toRpcException(exception));
+    // Emit the plain `{ code, message }` payload, not the RpcException itself:
+    // Nest hands this straight to the grpc-js callback, which reads `.code` off
+    // it. An RpcException has no `.code`, so every error became UNKNOWN (→ 500).
+    return throwError(() => this.toRpcException(exception).getError());
   }
 
   private toRpcException(exception: unknown): RpcException {
