@@ -26,6 +26,15 @@ async function bootstrap(): Promise<void> {
         package: ['ecom.order.v1'],
         protoPath: [PROTO_FILES.order, PROTO_FILES.common],
         loader: GRPC_LOADER_OPTIONS,
+        // LB-5: grpc-js clients only re-resolve DNS when a connection drops,
+        // so a replica added after startup would never get traffic. Closing
+        // each connection (GOAWAY) after 30 s forces a reconnect, which makes
+        // the client's dns:/// resolver pick up new replicas. The grace period
+        // lets in-flight RPCs finish first.
+        channelOptions: {
+          'grpc.max_connection_age_ms': 30_000,
+          'grpc.max_connection_age_grace_ms': 10_000,
+        },
       },
     },
     { inheritAppConfig: true },

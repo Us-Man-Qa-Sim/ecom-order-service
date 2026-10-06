@@ -1,5 +1,6 @@
 import { Controller, Get } from '@nestjs/common';
 import { HealthCheck, HealthCheckService, PrismaHealthIndicator } from '@nestjs/terminus';
+import { hostname } from 'node:os';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Controller('health')
@@ -18,6 +19,6 @@ export class HealthController {
 
   @Get('live')
   live() {
-    return { status: 'ok' as const };
+    return { status: 'ok' as const, instanceId: hostname() };
   }
 }
