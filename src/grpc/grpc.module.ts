@@ -9,6 +9,10 @@ import { UserGrpcClient } from './user.client';
 import { ProductGrpcClient } from './product.client';
 import { GrpcCallTimeouts } from './grpc-call.util';
 
+const ROUND_ROBIN_SERVICE_CONFIG = JSON.stringify({
+  loadBalancingConfig: [{ round_robin: {} }],
+});
+
 @Module({
   imports: [
     ClientsModule.registerAsync({
@@ -39,6 +43,9 @@ import { GrpcCallTimeouts } from './grpc-call.util';
               package: [ECOM_PRODUCT_V1_PACKAGE_NAME],
               protoPath: [PROTO_FILES.product, PROTO_FILES.common],
               loader: GRPC_LOADER_OPTIONS,
+              channelOptions: {
+                'grpc.service_config': ROUND_ROBIN_SERVICE_CONFIG,
+              },
             },
           }),
         },
