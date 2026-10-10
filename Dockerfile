@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # ── Stage 1: build ──
-FROM node:24.21.0-alpine AS build
+FROM node:26.10.0-alpine AS build
 WORKDIR /app
 
 RUN apk add --no-cache python3 make g++ openssl
@@ -20,7 +20,7 @@ RUN npm run build
 RUN npm prune --omit=dev
 
 # ── Stage 2: runtime ──
-FROM node:24.21.0-alpine AS runtime
+FROM node:26.10.0-alpine AS runtime
 WORKDIR /app
 
 ENV NODE_ENV=production
